@@ -1,8 +1,12 @@
 """Embedding Generator"""
+import os
 from typing import List
 from app.config import settings
 from sentence_transformers import SentenceTransformer
 from openai import OpenAI
+
+# tokenizers 경고 해결
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 class EmbeddingGenerator:

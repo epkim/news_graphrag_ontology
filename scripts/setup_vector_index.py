@@ -67,18 +67,40 @@ def create_vector_index():
             session.run(cypher)
             print(f"Vector Index 생성 완료! (차원: {dimension})")
             
-            # 인덱스 상태 확인
-            result = session.run(
-                """
-                SHOW INDEXES
-                YIELD name, type, state
-                WHERE name = 'content-embeddings'
-                RETURN name, type, state
-                """
-            )
+            # 인덱스 상태 확인 및 완료 대기
+            import time
+            max_wait_time = 60  # 최대 60초 대기
+            wait_interval = 2  # 2초마다 확인
+            elapsed_time = 0
             
-            for record in result:
-                print(f"인덱스 상태: {dict(record)}")
+            while elapsed_time < max_wait_time:
+                result = session.run(
+                    """
+                    SHOW INDEXES
+                    YIELD name, type, state, populationPercent
+                    WHERE name = 'content-embeddings'
+                    RETURN name, type, state, populationPercent
+                    """
+                )
+                
+                record = result.single()
+                if record:
+                    state = record["state"]
+                    percent = record.get("populationPercent", 0)
+                    print(f"인덱스 상태: {state} ({percent}% 완료)")
+                    
+                    if state == "ONLINE":
+                        print("✅ 인덱스가 준비되었습니다!")
+                        break
+                    elif state == "FAILED":
+                        print("❌ 인덱스 생성 실패!")
+                        break
+                
+                time.sleep(wait_interval)
+                elapsed_time += wait_interval
+            
+            if elapsed_time >= max_wait_time:
+                print("⚠️  인덱스 구축이 아직 진행 중입니다. 잠시 후 다시 시도해주세요.")
     
     except Exception as e:
         print(f"에러 발생: {e}")

@@ -1,4 +1,9 @@
 """FastAPI 서버"""
+import os
+
+# tokenizers 경고 해결
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
