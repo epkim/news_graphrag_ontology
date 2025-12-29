@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>News GraphRAG Ontology Platform</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <script src="https://unpkg.com/cytoscape-cose-bilkent@1.6.2/cytoscape-cose-bilkent.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>News GraphRAG Ontology Platform</h1>
+        </header>
+        
+        <div class="main-content">
+            <div class="left-panel">
+                <div class="search-section">
+                    <h2>검색</h2>
+                    <div class="search-box">
+                        <input 
+                            type="text" 
+                            id="queryInput" 
+                            placeholder="자연어로 질의를 입력하세요 (예: 최근 AI 관련 뉴스 요약)"
+                            autocomplete="off"
+                        >
+                        <button id="searchBtn">검색</button>
+                    </div>
+                    <div id="retrieverInfo" class="retriever-info"></div>
+                </div>
+                
+                <div class="results-section">
+                    <h2>검색 결과</h2>
+                    <div id="answer" class="answer-box"></div>
+                    <div id="loading" class="loading" style="display: none;">
+                        검색 중...
+                    </div>
+                </div>
+                
+                <div class="history-section">
+                    <h2>검색 히스토리</h2>
+                    <div id="history" class="history-list"></div>
+                </div>
+            </div>
+            
+            <div class="right-panel">
+                <div class="graph-section">
+                    <h2>그래프 시각화</h2>
+                    <div id="cy" class="graph-container"></div>
+                    <div class="graph-controls">
+                        <button id="refreshGraphBtn">그래프 새로고침</button>
+                        <button id="clearGraphBtn">그래프 지우기</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
+
