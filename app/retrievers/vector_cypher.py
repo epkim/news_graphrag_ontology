@@ -11,11 +11,14 @@ from app.retrievers.vector import VectorRetriever
 class VectorCypherRetriever(BaseRetriever):
     """벡터 검색 결과를 기반으로 그래프 확장"""
     
-    def __init__(self, top_k: int = 5, similarity_threshold: float = 0.5):
+    def __init__(self, top_k: int = None, similarity_threshold: float = None):
         self.driver = GraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password)
         )
+        # 설정값 우선, 없으면 기본값 사용
+        top_k = top_k if top_k is not None else settings.vector_top_k
+        similarity_threshold = similarity_threshold if similarity_threshold is not None else settings.similarity_threshold
         self.vector_retriever = VectorRetriever(top_k=top_k, similarity_threshold=similarity_threshold)
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
@@ -27,8 +30,15 @@ class VectorCypherRetriever(BaseRetriever):
     
     def retrieve(self, query: str) -> Tuple[List[Node], List[Edge], str]:
         """벡터 검색 후 그래프 확장"""
-        # 1. 벡터 검색으로 관련 Content 노드 찾기
+        # 1. 벡터 검색으로 관련 Content 노드 찾기 (더 많은 결과 가져오기)
+        # VectorCypher는 더 많은 관련 노드를 찾아서 그래프를 확장하므로 top_k를 늘림
+        original_top_k = self.vector_retriever.top_k
+        self.vector_retriever.top_k = min(original_top_k * 2, 20)  # 최대 20개
+        
         content_nodes, _, content_context = self.vector_retriever.retrieve(query)
+        
+        # 원래 top_k 복원
+        self.vector_retriever.top_k = original_top_k
         
         if not content_nodes:
             return [], [], "관련 콘텐츠를 찾을 수 없습니다."
@@ -53,14 +63,17 @@ class VectorCypherRetriever(BaseRetriever):
         
         # 관련 Article만 조회 (불필요한 확장 방지)
         # Content 노드는 Neo4j 내부 ID로 매칭
+        # 유사도 점수가 높은 순으로 정렬하여 관련성 높은 기사 우선
         cypher = """
         MATCH (c:Content)
         WHERE id(c) IN $content_neo4j_ids
         MATCH (a:Article)-[:HAS_CHUNK]->(c)
         OPTIONAL MATCH (a)-[:BELONGS_TO]->(cat:Category)
         OPTIONAL MATCH (m:Media)-[:PUBLISHED]->(a)
-        RETURN DISTINCT a, cat, m, c, id(c) as content_neo4j_id
-        ORDER BY id(c)
+        WITH a, cat, m, c, id(c) as content_neo4j_id
+        ORDER BY content_neo4j_id
+        RETURN DISTINCT a, cat, m, c, content_neo4j_id
+        LIMIT 50
         """
         
         # 쿼리 정보 저장 (로깅용)

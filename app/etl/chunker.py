@@ -40,33 +40,44 @@ class Chunker:
         Returns:
             문장 리스트 (종결 기호 포함)
         """
-        # 한국어 문장 종결 기호 패턴 (종결 기호 포함)
-        # 마침표, 느낌표, 물음표 (한국어/영어 모두 포함)
-        # 종결 기호를 포함하여 분할
-        sentence_endings = r'([.!?。！？]\s+)'
-        
-        # 문장 경계로 분할 (종결 기호 포함)
-        parts = re.split(sentence_endings, text)
+        # 먼저 문단 단위로 분할 (이중 줄바꿈)
+        paragraphs = re.split(r'\n\s*\n+', text)
         
         sentences = []
-        current_sentence = ""
         
-        for part in parts:
-            if not part.strip():
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
                 continue
             
-            # 종결 기호인지 확인
-            if re.match(r'^[.!?。！？]\s*$', part):
-                current_sentence += part
-                if current_sentence.strip():
-                    sentences.append(current_sentence.strip())
-                current_sentence = ""
-            else:
-                current_sentence += part
-        
-        # 마지막 문장 추가 (종결 기호가 없는 경우)
-        if current_sentence.strip():
-            sentences.append(current_sentence.strip())
+            # 문장 종결 기호 패턴 개선
+            # 마침표, 느낌표, 물음표 (한국어/영어 모두 포함)
+            # 숫자 뒤의 마침표는 제외 (예: "3.5" 또는 "1.")
+            # 영문 약어 뒤의 마침표는 제외 (예: "Dr.", "Mr.")
+            # 하지만 한국어 문맥에서는 대부분 문장 종결로 처리
+            
+            # 패턴: 종결 기호 + 공백/줄바꿈/문장 끝
+            # 숫자나 영문 약어 뒤가 아닌 경우만
+            sentence_pattern = r'(?<!\d)(?<!\.\d)(?<!Dr)(?<!Mr)(?<!Mrs)(?<!Ms)(?<!Prof)(?<!etc)(?<!i\.e)(?<!e\.g)[.!?。！？](?:\s+|$)'
+            
+            # 문장으로 분할
+            para_sentences = re.split(sentence_pattern, para)
+            
+            # 종결 기호 복원
+            matches = list(re.finditer(sentence_pattern, para))
+            for i, sentence in enumerate(para_sentences):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                
+                # 다음 매치가 있으면 종결 기호 추가
+                if i < len(matches):
+                    match = matches[i]
+                    end_char = para[match.end() - 1] if match.end() > 0 else ""
+                    if end_char in '.!?。！？':
+                        sentence += end_char
+                
+                sentences.append(sentence)
         
         return sentences
     
@@ -134,17 +145,59 @@ class Chunker:
         Returns:
             청크 리스트
         """
-        # 1. 문장 경계로 분할
+        # 0. 빈 텍스트 처리
+        if not text or not text.strip():
+            return []
+        
+        # 1. 먼저 문단 단위로 분할 시도 (문맥 보존에 가장 좋음)
+        paragraphs = re.split(r'\n\s*\n+', text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        
+        # 문단이 청크 크기보다 작으면 문단 단위로 유지
+        if paragraphs and all(len(p) <= settings.chunk_size * 1.2 for p in paragraphs):
+            # 문단들을 병합하여 청크 생성
+            chunks = []
+            current_chunk = []
+            current_size = 0
+            
+            for para in paragraphs:
+                para_size = len(para)
+                
+                if current_size + para_size <= settings.chunk_size:
+                    current_chunk.append(para)
+                    current_size += para_size + 2  # +2는 줄바꿈
+                else:
+                    if current_chunk:
+                        chunks.append("\n\n".join(current_chunk))
+                    
+                    # 오버랩 처리
+                    if settings.chunk_overlap > 0 and chunks:
+                        prev_chunk = chunks[-1]
+                        overlap_text = prev_chunk[-settings.chunk_overlap:] if len(prev_chunk) > settings.chunk_overlap else prev_chunk
+                        current_chunk = [overlap_text, para] if overlap_text else [para]
+                    else:
+                        current_chunk = [para]
+                    
+                    current_size = para_size
+            
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+            
+            # 문단 단위 청킹이 성공했으면 반환
+            if chunks and all(len(c) <= settings.chunk_size * 1.5 for c in chunks):
+                return chunks
+        
+        # 2. 문장 경계로 분할
         sentences = self._split_by_sentence_boundary(text)
         
-        # 2. 문장들을 청크 크기에 맞게 병합
+        # 3. 문장들을 청크 크기에 맞게 병합
         chunks = self._merge_sentences_to_chunks(
             sentences,
             max_chunk_size=settings.chunk_size,
             overlap=settings.chunk_overlap
         )
         
-        # 3. 만약 청킹이 제대로 안 되었다면 (예: 문장이 너무 긴 경우)
+        # 4. 만약 청킹이 제대로 안 되었다면 (예: 문장이 너무 긴 경우)
         # 또는 청크가 생성되지 않은 경우 RecursiveCharacterTextSplitter를 대체로 사용
         if not chunks:
             # 청크가 없으면 RecursiveCharacterTextSplitter 사용

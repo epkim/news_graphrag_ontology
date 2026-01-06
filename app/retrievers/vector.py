@@ -10,29 +10,57 @@ from app.retrievers.base import BaseRetriever
 class VectorRetriever(BaseRetriever):
     """벡터 유사도 기반 검색"""
     
-    def __init__(self, top_k: int = 5, similarity_threshold: float = 0.5):
+    def __init__(self, top_k: int = None, similarity_threshold: float = None):
         self.driver = GraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password)
         )
         self.embedding_generator = EmbeddingGenerator()
-        self.top_k = top_k
-        self.similarity_threshold = similarity_threshold  # 유사도 임계값
+        # 설정값 우선, 없으면 기본값 사용
+        self.top_k = top_k if top_k is not None else settings.vector_top_k
+        self.similarity_threshold = similarity_threshold if similarity_threshold is not None else settings.similarity_threshold
     
     def close(self):
         """드라이버 종료"""
         self.driver.close()
     
+    def _expand_query(self, query: str) -> str:
+        """
+        쿼리 확장: 사용자 질의를 더 풍부하게 만들기
+        예: "AI" -> "AI 인공지능 머신러닝"
+        """
+        # 간단한 동의어 확장 (향후 LLM 기반 확장으로 개선 가능)
+        expansions = {
+            "AI": "AI 인공지능 머신러닝",
+            "인공지능": "AI 인공지능 머신러닝 딥러닝",
+            "경제": "경제 금융 시장 경제정책",
+            "정치": "정치 정부 국회 선거",
+            "기술": "기술 IT 소프트웨어 하드웨어",
+        }
+        
+        expanded_query = query
+        for key, expansion in expansions.items():
+            if key in query:
+                expanded_query = f"{query} {expansion}"
+                break
+        
+        return expanded_query
+    
     def retrieve(self, query: str) -> Tuple[List[Node], List[Edge], str]:
         """벡터 검색 수행"""
-        # 쿼리 임베딩 생성
-        query_embedding = self.embedding_generator.generate_single(query)
+        # 쿼리 확장 (선택적)
+        expanded_query = self._expand_query(query)
+        
+        # 쿼리 임베딩 생성 (원본과 확장된 쿼리 모두 사용)
+        query_embedding = self.embedding_generator.generate_single(expanded_query)
         
         # Vector Index를 사용한 검색 (Neo4j 5.x 이상)
+        # 하이브리드 검색: 벡터 유사도 + 키워드 매칭 (향후 개선 가능)
         cypher = """
         CALL db.index.vector.queryNodes('content-embeddings', $k, $queryVector)
         YIELD node, score
         MATCH (node:Content)
+        WHERE node.text IS NOT NULL
         RETURN node, score
         ORDER BY score DESC
         LIMIT $k
@@ -43,17 +71,24 @@ class VectorRetriever(BaseRetriever):
         
         try:
             with self.driver.session() as session:
-                result = session.run(cypher, queryVector=query_embedding, k=self.top_k)
+                # Neo4j 벡터 인덱스는 코사인 유사도를 사용하므로
+                # score는 높을수록 유사함 (0~1 범위, 1에 가까울수록 유사)
+                result = session.run(cypher, queryVector=query_embedding, k=self.top_k * 2)  # 더 많이 가져와서 필터링
                 records = list(result)
-                used_query = f"CALL db.index.vector.queryNodes('content-embeddings', {self.top_k}, [queryVector])"
+                used_query = f"CALL db.index.vector.queryNodes('content-embeddings', {self.top_k * 2}, [queryVector])"
                 
                 # Vector Index를 사용하는 경우: score가 이미 반환됨
+                # Neo4j의 코사인 유사도는 높을수록 유사함
                 for record in records:
                     node = record["node"]
                     score = record["score"]
-                    scored_records.append(({"node": node}, score))
+                    # score가 거리 기반일 수도 있으므로 확인
+                    # 코사인 유사도는 보통 0~1 범위이고 높을수록 유사
+                    # 만약 거리 기반이면 (낮을수록 유사) 변환 필요
+                    # 하지만 Neo4j는 similarity_function이 'cosine'이면 유사도(높을수록 유사)를 반환
+                    scored_records.append(({"node": node}, float(score)))
                 
-                # 점수 순으로 정렬
+                # 점수 순으로 정렬 (높은 순)
                 scored_records.sort(key=lambda x: x[1], reverse=True)
         except Exception as e:
             print(f"[VECTOR] Vector Index 오류: {e}, 대체 쿼리 사용")
@@ -97,17 +132,53 @@ class VectorRetriever(BaseRetriever):
         # 유사도 점수 기반 필터링 및 정렬
         filtered_scored_records = []
         seen_node_ids = set()  # 중복 제거용
+        
+        # 디버깅: 상위 점수 출력
+        if scored_records:
+            top_scores = [f"{s:.4f}" for _, s in scored_records[:5]]
+            print(f"[VECTOR] 상위 5개 유사도 점수: {', '.join(top_scores)}")
+        
+        filtered_count = 0
         for record_dict, score in scored_records:
             # 유사도 임계값 이상인 것만 포함
+            # Neo4j 코사인 유사도는 0~1 범위, 높을수록 유사
+            # OpenAI 임베딩의 경우 일반적으로 0.7 이상이면 매우 유사, 0.5~0.7은 중간, 0.5 미만은 낮음
             if score >= self.similarity_threshold:
                 node_id = str(record_dict["node"].id)
                 # 중복 노드 제거
                 if node_id not in seen_node_ids:
                     seen_node_ids.add(node_id)
                     filtered_scored_records.append((record_dict, score))
+            else:
+                filtered_count += 1
+        
+        if filtered_count > 0:
+            print(f"[VECTOR] {filtered_count}개 결과가 임계값({self.similarity_threshold}) 미만으로 필터링됨")
+        
+        # 재랭킹: 키워드 매칭 점수 추가 (하이브리드 검색)
+        # 벡터 유사도 + 키워드 매칭 점수를 결합하여 정확도 향상
+        query_keywords = set(query.lower().split())
+        
+        reranked_records = []
+        for record_dict, vector_score in filtered_scored_records:
+            content_node = record_dict["node"]
+            properties = dict(content_node)
+            text = properties.get("text", "").lower()
+            
+            # 키워드 매칭 점수 계산 (간단한 TF 기반)
+            matched_keywords = sum(1 for keyword in query_keywords if keyword in text)
+            keyword_score = matched_keywords / max(len(query_keywords), 1)  # 0~1 범위
+            
+            # 하이브리드 점수: 벡터 유사도 70% + 키워드 매칭 30%
+            hybrid_score = (vector_score * 0.7) + (keyword_score * 0.3)
+            
+            reranked_records.append((record_dict, hybrid_score, vector_score, keyword_score))
+        
+        # 하이브리드 점수로 재정렬
+        reranked_records.sort(key=lambda x: x[1], reverse=True)
         
         # 상위 K개만 선택
-        for record_dict, score in filtered_scored_records[:self.top_k]:
+        for record_dict, hybrid_score, vector_score, keyword_score in reranked_records[:self.top_k]:
             content_node = record_dict["node"]
             node_id = str(content_node.id)
             properties = dict(content_node)
@@ -116,10 +187,18 @@ class VectorRetriever(BaseRetriever):
                 id=node_id,
                 label=properties.get("text", "")[:50] + "...",
                 type="Content",
-                properties={**properties, "similarity_score": score}  # 유사도 점수 포함
+                properties={
+                    **properties, 
+                    "similarity_score": vector_score,  # 원본 벡터 유사도
+                    "hybrid_score": hybrid_score,  # 하이브리드 점수
+                    "keyword_score": keyword_score  # 키워드 매칭 점수
+                }
             ))
             
             context_parts.append(properties.get("text", ""))
+        
+        if reranked_records:
+            print(f"[VECTOR] 재랭킹 완료: 상위 {min(len(reranked_records), self.top_k)}개 선택")
         
         # Content 노드에서 Article로 확장하여 노드와 엣지 추가
         if nodes:

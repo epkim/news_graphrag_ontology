@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 50
     
+    # Vector Search
+    similarity_threshold: float = 0.5  # 벡터 검색 유사도 임계값 (0.0~1.0)
+    vector_top_k: int = 5  # 벡터 검색 결과 개수
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
